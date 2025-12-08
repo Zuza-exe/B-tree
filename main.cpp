@@ -17,7 +17,7 @@ using namespace std;
 #define     MAX_KEYS    (2 * D_VALUE)
 
 #define     DATA_PAGE_SIZE      (MAX_KEYS)      //how many records can be put in single data page (maybe change to number of bytes?)
-#define INDEX_BUFFER_LIMIT      5           //how many pages can be put in RAM
+#define INDEX_BUFFER_LIMIT      5           //how many pages can be put in buffer in RAM
 #define DATA_BUFFER_LIMIT      5
 
 #define		MANUAL_TXT_FILENAME	"./tests/manual_data.txt"
@@ -59,9 +59,9 @@ struct Data_page
 struct B_tree_page
 {
     unsigned int id;
-    B_tree_record keys[MAX_KEYS];
+    B_tree_record keys[MAX_KEYS +1];    //one more in case of overflow
     unsigned int keys_num;
-    unsigned int children_id[MAX_KEYS + 1];    //id of pages
+    unsigned int children_id[MAX_KEYS + 2];    //id of pages - one more in case of overflow
     unsigned int parent_id;
     bool is_leaf;
     bool dirty;
@@ -74,6 +74,10 @@ struct B_tree_page
     {
         return keys_num == MAX_KEYS;
     }
+    bool has_free_slots()
+    {
+        return keys_num < MAX_KEYS;
+    }
     bool is_overflown()
     {
         return keys_num > MAX_KEYS;
@@ -82,13 +86,64 @@ struct B_tree_page
     {
         if (is_root())
         {
-            return false;
+            return keys_num==0;
         }
         return keys_num<MIN_KEYS;
     }
-    bool has_free_slots()
+    //returns: -1 if not possible, id in parent.children_id array if possible
+    int compensation_possible()
     {
-        return keys_num<MAX_KEYS;
+        if(is_root())
+        {
+            return -1;      //compensation impossible for the root
+        }
+        B_tree_page parent = get_index_page(parent_id, INDEX_DAT_FILENAME);
+        //find position in children[] array
+        int i = 0;
+        while(i <= parent.keys_num && parent.children_id[i] != id)
+        {
+            i++;
+        }
+
+        if(i > parent.keys_num)     //error backup - shouldn't happen
+        {
+            cerr << "Error: child not found in parent.\n";
+            return -1;
+        }
+        if (i == 0)     //page is the first child
+        {
+            //check only right sibling
+            B_tree_page sibling = get_index_page(parent.children_id[1], INDEX_DAT_FILENAME);
+            if (sibling.has_free_slots())
+            {
+                return 1;
+            }
+            return -1;
+        }
+        else if (i == parent.keys_num)      //page is the last child
+        {
+            //check only left sibling
+            B_tree_page sibling = get_index_page(parent.children_id[i-1], INDEX_DAT_FILENAME);
+            if (sibling.has_free_slots())
+            {
+                return i-1;
+            }
+            return -1;
+        }
+        B_tree_page sibling = get_index_page(parent.children_id[i-1], INDEX_DAT_FILENAME);      //left
+        if (sibling.has_free_slots())
+        {   
+            return i-1;     //return left sibling
+        }
+        else
+        {
+            sibling = get_index_page(parent.children_id[i+1], INDEX_DAT_FILENAME);      //right
+            if(sibling.has_free_slots())
+            {
+                return i+1;     //return right sibling
+            }
+            return -1;     //both siblings full
+        }
     }
     //returns id of wanted key in the page, -1 if not present
     int bisection_search(unsigned int key)
@@ -114,19 +169,50 @@ struct B_tree_page
         }
         return -1;      //not found
     }
+    void compensate()
+    {
+        
+    }
+    void split()
+    {
+
+    }
+    //cannot be called if record is full
     void insert(B_tree_record rec)
     {
         dirty = true;
         int i = 0;
-        while(rec.key > keys[i].key)
+        while(i<keys_num && rec.key > keys[i].key)
         {
             i++;
         }
-        for(int j = keys_num-1; j<i; j--)
+        for(int j = keys_num; j>i; j--)
         {
-            keys[j+1] = keys[j];    //moving records to the right side
-            children_id[j]
+            keys[j] = keys[j-1];    //moving records to the right side
         }
+        if(!is_leaf)
+        {
+            for(int j = keys_num+1; j>i+1; j--)
+            {
+                children_id[j] = children_id[j-1];    //moving children from the right side
+            }
+        }
+        keys[i] = rec;          //inserting new page
+        keys_num++;
+
+        //overflow
+        if(keys_num > MAX_KEYS)
+        {
+            if(compensation_possible())
+            {
+                compensate();
+            }
+            else
+            {
+                split();
+            }
+        }
+
     }
 };
 
@@ -215,14 +301,14 @@ struct B_tree
             cout<<"Record with key "<<new_rec.key<<" already exists in the B-tree."<<endl;
             return;
         }
-        unsigned int current_page_id = root;
+        unsigned int current_page_id = rec.page_id;
         B_tree_page current_page;
 
         current_page = get_index_page(current_page_id, index_dat_filename);
-        if(current_page.has_free_slots())
-        {
+        //if(current_page.has_free_slots())     //case handled inside current_page.insert() function
+        //{
             current_page.insert(new_rec);
-        }
+        //}
     }
 };
 
@@ -341,8 +427,8 @@ void write_index_page(unsigned int page_id, const B_tree_page& page, const strin
     index.seekp(page_id * sizeof(B_tree_page), ios::beg);
     index.write(reinterpret_cast<const char*>(&page), sizeof(B_tree_page));
 
-    write_count_index++;                 // ✅ zapis fizyczny
-    index_buffer[page_id] = page;        // aktualizacja RAM
+    write_count_index++;
+    index_buffer[page_id] = page;
 }
 
 Data_page get_data_page(unsigned int page_id, const string& filename)
