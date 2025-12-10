@@ -12,7 +12,7 @@ using namespace std;
 
 //PARAMETERS
 
-#define     D_VALUE     2
+#define     D_VALUE     2       //d - degree of the B-tree
 #define     MIN_KEYS    (D_VALUE)
 #define     MAX_KEYS    (2 * D_VALUE)
 
@@ -90,14 +90,14 @@ struct B_tree_page
         }
         return keys_num<MIN_KEYS;
     }
-    //returns: -1 if not possible, id in parent.children_id array if possible
-    int compensation_possible()
+    //returns: UINT_MAX if not possible, id in parent.children_id array if possible
+    unsigned int compensation_possible()
     {
         if(is_root())
         {
-            return -1;      //compensation impossible for the root
+            return UINT_MAX;      //compensation impossible for the root
         }
-        B_tree_page parent = get_index_page(parent_id, INDEX_DAT_FILENAME);
+        B_tree_page& parent = get_index_page(parent_id, INDEX_DAT_FILENAME);
         //find position in children[] array
         int i = 0;
         while(i <= parent.keys_num && parent.children_id[i] != id)
@@ -108,29 +108,29 @@ struct B_tree_page
         if(i > parent.keys_num)     //error backup - shouldn't happen
         {
             cerr << "Error: child not found in parent.\n";
-            return -1;
+            return UINT_MAX;
         }
         if (i == 0)     //page is the first child
         {
             //check only right sibling
-            B_tree_page sibling = get_index_page(parent.children_id[1], INDEX_DAT_FILENAME);
+            B_tree_page& sibling = get_index_page(parent.children_id[1], INDEX_DAT_FILENAME);
             if (sibling.has_free_slots())
             {
                 return 1;
             }
-            return -1;
+            return UINT_MAX;
         }
         else if (i == parent.keys_num)      //page is the last child
         {
             //check only left sibling
-            B_tree_page sibling = get_index_page(parent.children_id[i-1], INDEX_DAT_FILENAME);
+            B_tree_page& sibling = get_index_page(parent.children_id[i-1], INDEX_DAT_FILENAME);
             if (sibling.has_free_slots())
             {
                 return i-1;
             }
-            return -1;
+            return UINT_MAX;
         }
-        B_tree_page sibling = get_index_page(parent.children_id[i-1], INDEX_DAT_FILENAME);      //left
+        B_tree_page& sibling = get_index_page(parent.children_id[i-1], INDEX_DAT_FILENAME);      //left
         if (sibling.has_free_slots())
         {   
             return i-1;     //return left sibling
@@ -142,7 +142,7 @@ struct B_tree_page
             {
                 return i+1;     //return right sibling
             }
-            return -1;     //both siblings full
+            return UINT_MAX;     //both siblings full
         }
     }
     //returns id of wanted key in the page, -1 if not present
@@ -169,9 +169,139 @@ struct B_tree_page
         }
         return -1;      //not found
     }
-    void compensate()
+    //sibling_id in the function is its id in children_id array
+    void compensate(unsigned int sibling_id)
     {
-        
+        B_tree_page& parent = get_index_page(parent_id, INDEX_DAT_FILENAME);
+        B_tree_page& sibling = get_index_page(parent.children_id[sibling_id], INDEX_DAT_FILENAME);
+        unsigned int all_keys_num = keys_num + sibling.keys_num + 1;        //1 comes from the parent
+        B_tree_record *all_keys = new B_tree_record [all_keys_num];       //temporary array to hold all the keys
+        unsigned int *all_children = new unsigned int [all_keys_num+1];     //temporary array to hold children
+
+        //checking if it's the right or left sibling and filling both temporary arrays
+        bool right_sibling = false;
+        if (keys[0].key < sibling.keys[0].key)
+        {
+            right_sibling = true;
+        }
+        if(right_sibling)   //right sibling
+        {
+            int i = 0;
+            for(i = 0; i<keys_num; i++)
+            {
+                all_keys[i] = keys[i];
+                all_children[i] = children_id[i];
+            }
+            all_keys[keys_num] = parent.keys[sibling_id-1];    //the parent's key
+            all_children[keys_num] = children_id[keys_num];       //the last child from left sibling
+            int j = 0;
+            for (i = keys_num+1; i<all_keys_num; i++)
+            {
+                all_keys[i] = sibling.keys[j];
+                all_children[i] = sibling.children_id[j];
+                j++;
+            }
+            all_children[all_keys_num] = sibling.children_id[sibling.keys_num];     //the last child from the right sibling
+        }
+        else    //left sibling
+        {
+            int i = 0;
+            for(i = 0; i<sibling.keys_num; i++)
+            {
+                all_keys[i] = sibling.keys[i];
+                all_children[i] = sibling.children_id[i];
+            }
+            all_keys[sibling.keys_num] = parent.keys[sibling_id];    //the parent's key
+            all_children[sibling.keys_num] = sibling.children_id[sibling.keys_num];       //the last child from the left sibling
+            int j = 0;
+            for (i = sibling.keys_num+1; i<all_keys_num; i++)
+            {
+                all_keys[i] = keys[j];
+                all_children[i] = children_id[j];
+                j++;
+            }
+            all_children[all_keys_num] = children_id[keys_num];     //the last child from the right sibling
+        }
+        unsigned int med = all_keys_num/2;          //median will go to the parent
+        unsigned int children_med = (all_keys_num+1)/2;
+        if (right_sibling)
+        {
+            //left
+            int i = 0;
+            for (i = 0; i<med; i++)
+            {
+                keys[i] = all_keys[i];
+                if(!is_leaf)
+                {
+                    children_id[i] = all_children[i];
+                }
+            }
+            if(!is_leaf)
+            {
+                children_id[med] = all_children[med];
+            }
+            keys_num = med;
+            //parent
+            parent.keys[sibling_id-1] = all_keys[med];
+            //right
+            int j = 0;
+            for (i = med+1; i<all_keys_num; i++)
+            {
+                sibling.keys[j] = all_keys[i];
+                if(!is_leaf)
+                {
+                    sibling.children_id[j] = all_children[i];
+                }
+                j++;
+            }
+            sibling.keys_num = all_keys_num - 1 - med;
+            if(!is_leaf)
+            {
+                sibling.children_id[sibling.keys_num] = all_children[all_keys_num];
+            }
+        }
+        else
+        {
+            //left
+            int i = 0;
+            for (i = 0; i<med; i++)
+            {
+                sibling.keys[i] = all_keys[i];
+                if(!is_leaf)
+                {
+                    sibling.children_id[i] = all_children[i];
+                }
+            }
+            if(!is_leaf)
+            {
+                children_id[med] = all_children[med];
+            }
+            sibling.keys_num = med;
+            //parent
+            parent.keys[sibling_id] = all_keys[med];
+            //right
+            int j = 0;
+            for (i = med+1; i<all_keys_num; i++)
+            {
+                keys[j] = all_keys[i];
+                if(!is_leaf)
+                {
+                    children_id[j] = all_children[i];
+                }
+                j++;
+            }
+            keys_num = all_keys_num - 1 - med;
+            if(!is_leaf)
+            {
+                children_id[sibling.keys_num] = all_children[all_keys_num];
+            }
+        }
+        /*write_index_page(id, *this, INDEX_DAT_FILENAME);
+        write_index_page(sibling.id, sibling, INDEX_DAT_FILENAME);
+        write_index_page(parent_id, parent, INDEX_DAT_FILENAME);*/
+        dirty = true;
+        delete[] all_keys;
+        delete[] all_children;
     }
     void split()
     {
@@ -190,22 +320,23 @@ struct B_tree_page
         {
             keys[j] = keys[j-1];    //moving records to the right side
         }
-        if(!is_leaf)
+        /*if(!is_leaf)      //not needed - won't be called on leaf
         {
             for(int j = keys_num+1; j>i+1; j--)
             {
-                children_id[j] = children_id[j-1];    //moving children from the right side
+                children_id[j] = children_id[j-1];    //moving children to the right side
             }
-        }
+        }*/
         keys[i] = rec;          //inserting new page
         keys_num++;
 
         //overflow
         if(keys_num > MAX_KEYS)
         {
-            if(compensation_possible())
+            unsigned int free_sibling_id = compensation_possible();
+            if(free_sibling_id != UINT_MAX)
             {
-                compensate();
+                compensate(free_sibling_id);
             }
             else
             {
@@ -231,6 +362,11 @@ struct B_tree
         return false;
     }
 
+    void print()
+    {
+        
+    }
+
     B_tree_record search_for(unsigned int key)
     {
         if (is_empty())
@@ -238,7 +374,6 @@ struct B_tree
             return {UINT_MAX, UINT_MAX, UINT_MAX};      //not found
         }
         unsigned int current_page_id = root;
-        B_tree_page current_page;
 
         ifstream index(index_dat_filename, ios::binary);
         if(!index.is_open())
@@ -246,6 +381,8 @@ struct B_tree
             cerr<<"Error: Couldn't open "<<index_dat_filename<<" file."<<endl;
             return {UINT_MAX, UINT_MAX, UINT_MAX};
         }
+
+        B_tree_page& current_page = get_index_page(current_page_id, index_dat_filename);
 
         while(true)
         {
@@ -302,13 +439,10 @@ struct B_tree
             return;
         }
         unsigned int current_page_id = rec.page_id;
-        B_tree_page current_page;
+        B_tree_page& current_page = get_index_page(current_page_id, index_dat_filename); 
 
-        current_page = get_index_page(current_page_id, index_dat_filename);
-        //if(current_page.has_free_slots())     //case handled inside current_page.insert() function
-        //{
-            current_page.insert(new_rec);
-        //}
+        current_page.insert(new_rec);
+        
     }
 };
 
@@ -370,7 +504,7 @@ void txt_to_dat(const string &txt, const string &dat) {
     out.close();
 }
 
-B_tree_page get_index_page(unsigned int page_id, const string& filename)
+B_tree_page& get_index_page(unsigned int page_id, const string& filename)
 {
     //page in RAM - don't read it from disk
     unordered_map<unsigned int, B_tree_page>::iterator it = index_buffer.find(page_id);
@@ -412,7 +546,7 @@ B_tree_page get_index_page(unsigned int page_id, const string& filename)
 
     index_buffer[page_id] = page;
 
-    return page;
+    return index_buffer[page_id];
 }
 
 void write_index_page(unsigned int page_id, const B_tree_page& page, const string& filename)
@@ -431,7 +565,7 @@ void write_index_page(unsigned int page_id, const B_tree_page& page, const strin
     index_buffer[page_id] = page;
 }
 
-Data_page get_data_page(unsigned int page_id, const string& filename)
+Data_page& get_data_page(unsigned int page_id, const string& filename)
 {
     unordered_map<unsigned int, Data_page>::iterator it = data_buffer.find(page_id);
     if (it != data_buffer.end())
@@ -469,7 +603,7 @@ Data_page get_data_page(unsigned int page_id, const string& filename)
         }
     }*/
     data_buffer[page_id] = page;
-    return page;
+    return data_buffer[page_id];
 }
 
 void write_data_page(unsigned int page_id, const Data_page& page, const string& filename)
