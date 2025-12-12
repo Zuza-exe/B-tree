@@ -50,7 +50,7 @@ void write_data_page(unsigned int page_id, const Data_page& page, string& filena
 B_tree_page* get_index_page(unsigned int page_id, const string& filename);
 void write_index_page(unsigned int page_id, const B_tree_page& page, const string& filename);
 
-B_tree_page* init_B_tree_page(B_tree_page *page, bool is_leaf);
+B_tree_page* init_B_tree_page(B_tree_page *page);
 
 //STRUCTS
 
@@ -84,8 +84,12 @@ struct B_tree_page
     unsigned int keys_num;
     unsigned int children_id[MAX_KEYS + 2];    //id of pages - one more in case of overflow
     unsigned int parent_id;
-    bool is_leaf;
     bool dirty;
+
+    bool is_leaf()
+    {
+        return children_id[0] == UINT_MAX;
+    }
 
     bool is_root()
     {
@@ -127,7 +131,7 @@ struct B_tree_page
             cout<<keys[i].key<<" ";
         }
         cout<<endl;
-        if(!is_leaf)
+        if(!is_leaf())
         {
             for(int i = 0; i<keys_num+1;i++)
             {
@@ -141,6 +145,7 @@ struct B_tree_page
     {
         if(is_root())
         {
+            cout<<"no way ze wchodzi tutaj"<<endl;
             return UINT_MAX;      //compensation impossible for the root
         }
         B_tree_page* parent = get_index_page(parent_id, INDEX_DAT_FILENAME);
@@ -277,12 +282,12 @@ struct B_tree_page
             for (i = 0; i<med; i++)
             {
                 keys[i] = all_keys[i];
-                if(!is_leaf)
+                if(!is_leaf())
                 {
                     children_id[i] = all_children[i];
                 }
             }
-            if(!is_leaf)
+            if(!is_leaf())
             {
                 children_id[med] = all_children[med];
             }
@@ -294,14 +299,14 @@ struct B_tree_page
             for (i = med+1; i<all_keys_num; i++)
             {
                 sibling->keys[j] = all_keys[i];
-                if(!is_leaf)
+                if(!is_leaf())
                 {
                     sibling->children_id[j] = all_children[i];
                 }
                 j++;
             }
             sibling->keys_num = all_keys_num - 1 - med;
-            if(!is_leaf)
+            if(!is_leaf())
             {
                 sibling->children_id[sibling->keys_num] = all_children[all_keys_num];
             }
@@ -313,12 +318,12 @@ struct B_tree_page
             for (i = 0; i<med; i++)
             {
                 sibling->keys[i] = all_keys[i];
-                if(!is_leaf)
+                if(!is_leaf())
                 {
                     sibling->children_id[i] = all_children[i];
                 }
             }
-            if(!is_leaf)
+            if(!is_leaf())
             {
                 children_id[med] = all_children[med];
             }
@@ -330,14 +335,14 @@ struct B_tree_page
             for (i = med+1; i<all_keys_num; i++)
             {
                 keys[j] = all_keys[i];
-                if(!is_leaf)
+                if(!is_leaf())
                 {
                     children_id[j] = all_children[i];
                 }
                 j++;
             }
             keys_num = all_keys_num - 1 - med;
-            if(!is_leaf)
+            if(!is_leaf())
             {
                 children_id[sibling->keys_num] = all_children[all_keys_num];
             }
@@ -359,7 +364,7 @@ struct B_tree_page
 
         //filling new page
         B_tree_page new_page_s;
-        B_tree_page* new_page = init_B_tree_page(&new_page_s, is_leaf);        //it's going to be page on the right side
+        B_tree_page* new_page = init_B_tree_page(&new_page_s);        //it's going to be page on the right side
         unsigned int med = keys_num / 2;
         for(int i = 0; i<keys_num-med-1;i++)
         {
@@ -371,7 +376,6 @@ struct B_tree_page
         new_page->keys_num = keys_num - med - 1;
         new_page->children_id[new_page->keys_num] =children_id[keys_num];       //last child covered 
         children_id[keys_num] = UINT_MAX;
-        write_index_page(new_page->id, *new_page, INDEX_DAT_FILENAME);
 
         //moving key to the parent and connecting the parent with the new page
         B_tree_page parent_s;
@@ -382,8 +386,10 @@ struct B_tree_page
             parent = get_index_page(parent_id, INDEX_DAT_FILENAME);
             while(parent->children_id[i] != id)
             {
+                cout<<"chej"<<endl;
                 i++;
             }
+            cout<<"wyszlo?"<<endl;
             //i now is index of the page in the children_id array of the parent
             for(int j = parent->keys_num; j>i; j--)
             {
@@ -391,6 +397,7 @@ struct B_tree_page
                 parent->children_id[j+1] = parent->children_id[j];      //moving all keys and children to the right side
             }
             parent->children_id[i+1] = new_page->id;      //adding new page as a child
+            new_page->parent_id = parent->id;
             parent->keys[i] = keys[med];
             parent->keys_num += 1;
             keys[med] = {UINT_MAX, UINT_MAX, UINT_MAX};
@@ -412,17 +419,20 @@ struct B_tree_page
         }
         else
         {
-            parent = init_B_tree_page(&parent_s, false);
+            parent = init_B_tree_page(&parent_s);
             parent->keys[0] = keys[med];
             keys[med] = {UINT_MAX, UINT_MAX, UINT_MAX};
             keys_num = med;
             parent_id = parent->id;
             new_page->parent_id = parent->id;
+            cout<<"New page o id "<<new_page->id<<" rodzica o id: "<<new_page->parent_id<<endl;
             parent->children_id[0] = id;
             parent->children_id[1] = new_page->id;
             parent->keys_num = 1;
-            write_index_page(parent->id, *parent, INDEX_DAT_FILENAME);
         }
+        write_index_page(parent->id, *parent, INDEX_DAT_FILENAME);
+        write_index_page(new_page->id, *new_page, INDEX_DAT_FILENAME);
+
     }
     void insert(B_tree_record rec)
     {
@@ -436,7 +446,7 @@ struct B_tree_page
         {
             keys[j] = keys[j-1];    //moving records to the right side
         }
-        if(!is_leaf)
+        if(!is_leaf())
         {
             for(int j = keys_num+1; j>i+1; j--)
             {
@@ -522,7 +532,7 @@ struct B_tree
             {
                 return current_page->keys[result];
             }
-            if(current_page->is_leaf)
+            if(current_page->is_leaf())
             {
                 return {UINT_MAX, current_page_id, UINT_MAX};      //not found
             }
@@ -537,7 +547,7 @@ struct B_tree
                 current_page_id = current_page->children_id[current_page->keys_num];
                 continue;
             }
-            for(int i = 1; i<current_page->keys_num-1; i++)
+            for(int i = 1; i<current_page->keys_num; i++)
             {
                 if(key<current_page->keys[i].key)
                 {
@@ -559,16 +569,24 @@ struct B_tree
             return;
         }
         unsigned int current_page_id = rec.page_id;
-        B_tree_page* current_page = get_index_page(current_page_id, index_dat_filename); 
+        B_tree_page* current_page = get_index_page(current_page_id, index_dat_filename);
 
+        cout<<"Strona, do ktorej wstawiamy przed:";
+        current_page->print(1, 1);
+        cout<<endl;
+
+        cout<<"Strona o id "<<current_page_id<<"ma rodzica o id "<<current_page->parent_id<<endl;
         current_page->insert(new_rec);
 
         B_tree_page* root_p = get_index_page(root, index_dat_filename);
         if(!root_p->is_root())
         {
             root = root_p->parent_id;
-            cout<<"dzien dobry"<<endl;
         }
+
+        cout<<"Strona, do ktorej wstawiamy po:";
+        current_page->print(1, 1);
+        cout<<endl;
     }
 };
 
@@ -634,10 +652,10 @@ void txt_to_dat(const string &txt, const string &dat) {
     out.close();
 }
 
-B_tree_page* init_B_tree_page(B_tree_page* page, bool is_leaf)
+B_tree_page* init_B_tree_page(B_tree_page* page)
 {
+    cout<<"Init wywolany "<<next_page_id<<". raz!"<<endl;
     page->id = next_page_id;
-    page->is_leaf = is_leaf;
     page->keys_num = 0;
     page->parent_id = UINT_MAX;
     page->dirty = true;
@@ -845,7 +863,7 @@ void create_b_tree(const string& data_filename)
                 root.id = 0;
                 root.keys_num = 0;
                 root.parent_id = UINT_MAX;
-                root.is_leaf = true;
+                root.is_leaf() = true;
                 root.dirty = false;
                 for (int i=0; i<=MAX_KEYS+1; i++)
                 {
@@ -858,7 +876,7 @@ void create_b_tree(const string& data_filename)
                 }*/
 
                 B_tree_page root_page;
-                B_tree_page* root = init_B_tree_page(&root_page, true);
+                B_tree_page* root = init_B_tree_page(&root_page);
 
                 // zapis do pliku + bufora
                 write_index_page(0, *root, INDEX_DAT_FILENAME);
