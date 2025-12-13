@@ -575,11 +575,11 @@ struct B_tree
         }
     }
 
-    B_tree_record search_for(unsigned int key)
+    pair<B_tree_page*, unsigned int> search_for(unsigned int key)
     {
         if (is_empty())
         {
-            return {UINT_MAX, UINT_MAX, UINT_MAX};      //not found
+            return {nullptr, UINT_MAX};      //not found
         }
         unsigned int current_page_id = root;
 
@@ -587,7 +587,7 @@ struct B_tree
         if(!index.is_open())
         {
             cerr<<"Error: Couldn't open "<<index_dat_filename<<" file."<<endl;
-            return {UINT_MAX, UINT_MAX, UINT_MAX};
+            return {nullptr, UINT_MAX};
         }
 
         B_tree_page* current_page;
@@ -608,11 +608,11 @@ struct B_tree
             int result = current_page->bisection_search(key);
             if(result != -1)            //found on current page
             {
-                return current_page->keys[result];
+                return {current_page, result};
             }
             if(current_page->is_leaf())
             {
-                return {UINT_MAX, current_page_id, UINT_MAX};      //not found
+                return {current_page, UINT_MAX};      //not found
             }
 
             if(key < current_page->keys[0].key)
@@ -640,14 +640,17 @@ struct B_tree
 
     void insert(B_tree_record new_rec)
     {
-        B_tree_record rec = search_for(new_rec.key);
-        if (rec.key != UINT_MAX)
+        pair<B_tree_page*, unsigned int> result = search_for(new_rec.key);
+        B_tree_page* current_page = result.first;
+        unsigned int pos = result.second;
+
+        if (pos != UINT_MAX)
         {
             cout<<"Error: Couldn't insert record. Record with key "<<new_rec.key<<" already exists in the B-tree."<<endl;
             return;
         }
-        unsigned int current_page_id = rec.page_id;
-        B_tree_page* current_page = get_index_page(current_page_id, index_dat_filename);
+        unsigned int current_page_id = current_page->id;
+        //B_tree_page* current_page = get_index_page(current_page_id, index_dat_filename);
 
         current_page->insert(new_rec);
 
@@ -660,32 +663,35 @@ struct B_tree
 
     void read_record(unsigned int key)
     {
-        B_tree_record rec = search_for(key);
-        if(rec.key == UINT_MAX)     //not found
+        pair<B_tree_page*, unsigned int> result = search_for(key);
+        B_tree_page* current_page = result.first;
+        unsigned int pos = result.second;
+
+        if(pos == UINT_MAX)     //not found
         {
             cout<<"Error: Couldn't read record. Key "<<key<<" does not exist in the B-tree."<<endl;
             return;
         }
-        Data_page* dpage = get_data_page(rec.page_id, data_dat_filename);
+        Data_page* dpage = get_data_page(current_page->keys[pos].page_id, data_dat_filename);
         if (!dpage)
         {
             cerr << "Error: couldn't load data page\n";
             return;
         }
 
-        if (rec.offset >= DATA_PAGE_SIZE)
+        if (current_page->keys[pos].offset >= DATA_PAGE_SIZE)
         {
             cerr << "Error: offset out of range\n";
             return;
         }
 
-        if (dpage->slot_free[rec.offset])
+        if (dpage->slot_free[current_page->keys[pos].offset])
         {
             cerr << "Error: slot is marked as free, inconsistent state\n";
             return;
         }
 
-        Record r = dpage->records[rec.offset];
+        Record r = dpage->records[current_page->keys[pos].offset];
 
         cout << "Loaded record key = " << r.key << endl;
         for (int i = 0; i < 5; i++)
@@ -702,41 +708,78 @@ struct B_tree
 
     void remove(unsigned int key)
     {
-        B_tree_record rec = search_for(key);
-        if(rec.key == UINT_MAX)
+        pair<B_tree_page*, unsigned int> result = search_for(key);
+        B_tree_page* page = result.first;
+        unsigned int pos = result.second;
+        B_tree_record rec = page->keys[pos];
+
+        if(pos == UINT_MAX)
         {
             cout<<"Error: Couldn't remove record. Record with key "<<key<<" does not exist in the B-tree."<<endl;
             return;
         }
 
-        B_tree_page* page = get_index_page(rec.page_id, index_dat_filename);
-        B_tree_page* page_to_check;     //we'll see if needed
+        //B_tree_page* page = get_index_page(rec.page_id, index_dat_filename);
 
-        int i = 0;
+        B_tree_page* page_to_check;
+
+        /*int i = 0;
         while(i<page->keys_num && page->keys[i].key < key)
         {
             i++;            //finding position in the node
-        }
+        }*/
 
         if(!page->is_leaf())
         {
-            B_tree_page* child = get_index_page(page->children_id[i], index_dat_filename);      //left child
+            B_tree_page* child = get_index_page(page->children_id[pos], index_dat_filename);      //left child
+            bool from_left = true;
+            
             while (!child->is_leaf())
             {
                 child = get_index_page(child->children_id[child->keys_num], index_dat_filename);        //going to the right side until we reach the leaf
             }
-            page->keys[i] = child->keys[child->keys_num-1];        //taking the maximum value
-            child->keys[child->keys_num-1] = {UINT_MAX, child->id, UINT_MAX};     //clearing spot
+            if(child->keys_num == MIN_KEYS)
+            {
+                B_tree_page* predeccesor_page = child;      //remembering predeccesor's position in case exchanging with successor also will result in merge
+                //to prevent underflow nad merging, we're taking from the right side
+                child = get_index_page(page->children_id[pos + 1], index_dat_filename);      //right child
+                 while (!child->is_leaf())
+                {
+                    child = get_index_page(child->children_id[0], index_dat_filename);        //going to the left side until we reach the leaf
+                }
+                if(child->keys_num == MIN_KEYS)
+                {
+                    child = predeccesor_page;       //taking from the left side is prefered
+                }
+                else
+                {
+                    from_left = false;
+                }
+            }
+            if(from_left)
+            {
+                page->keys[pos] = child->keys[child->keys_num-1];        //taking the maximum value
+                child->keys[child->keys_num-1] = {UINT_MAX, UINT_MAX, UINT_MAX};     //clearing spot
+            }
+            else
+            {
+                page->keys[pos] = child->keys[0];       //taking the minimum value
+                for(int i = 0; i<child->keys_num-1; i++)
+                {
+                    child->keys[i] = child->keys[i+1];
+                }
+                child->keys[child->keys_num-1] = {UINT_MAX, UINT_MAX, UINT_MAX};
+            }
             child->keys_num--;
             page_to_check = child;
         }
         else
         {
-            for(int j = i; j <page->keys_num-1; j++)
+            for(int j = pos; j <page->keys_num-1; j++)
             {
                 page->keys[j] = page->keys[j+1];
             }
-            page->keys[page->keys_num - 1] = {UINT_MAX, page->id, UINT_MAX};
+            page->keys[page->keys_num - 1] = {UINT_MAX, UINT_MAX, UINT_MAX};
             page->keys_num--;
             page_to_check = page;
         }
