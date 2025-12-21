@@ -1,15 +1,8 @@
-//TODO:
-//- random records
-//- update record
-//- reading instructions from file
-
 #include <iostream>
 #include <vector>
 #include <fstream>
 #include <string>
-//#include <queue>
 #include<random>
-//#include <iomanip>
 #include <climits>      //to use UINT_MAX
 #include <unordered_map>
 #include <memory>       //to use unique_ptr in index buffer
@@ -21,24 +14,26 @@ using namespace std;
 
 //PARAMETERS
 
+#define     NUMBER_OF_RECORDS       30
 
 #define     D_VALUE     2       //d - degree of the B-tree
 #define     MIN_KEYS    (D_VALUE)
 #define     MAX_KEYS    (2 * D_VALUE)
 
 #define     DATA_PAGE_SIZE      (MAX_KEYS)      //how many records can be put in single data page
-#define     INDEX_BUFFER_LIMIT      4           //how many pages can be put in buffer in RAM
+#define     INDEX_BUFFER_LIMIT      10           //how many pages can be put in buffer in RAM
 #define     DATA_BUFFER_LIMIT      2
 
 #define     INSTRUCTIONS_TXT_FILENAME   "./tests/manual_instructions.txt"
 
-#define		MANUAL_TXT_FILENAME	"./tests/manual_data.txt"
+#define		MANUAL_TXT_FILENAME	"./tests/70_example.txt"
 #define     RANDOM_TXT_FILENAME     "./tests/random_data.txt"
 
 #define     DATA_DAT_FILENAME     "data.dat"
 #define     INDEX_DAT_FILENAME      "index.dat"     //same for both manual and random
 
 #define     PRINT_FILES         true            //if data.dat and B-tree should be printed
+#define     RANDOM_RECORDS      true
 
 
 //COUNTERS
@@ -62,19 +57,27 @@ struct B_tree_record;
 struct Data_page;
 struct B_tree_page;
 
+
 Data_page* get_data_page(unsigned int page_id, const string& filename);
-void write_data_page(unsigned int page_id, const Data_page& page, const string& filename);
+void write_data_page(unsigned int page_id, Data_page& page, const string& filename);
 void print_data_dat (const string& filename);
 pair<unsigned int, unsigned int> insert_rec_in_data_dat(Record rec);
 void update_rec_in_data_dat (B_tree_record rec_to_change, Record new_rec);
 
 B_tree_page* get_index_page(unsigned int page_id, const string& filename);
-void write_index_page(unsigned int page_id, const B_tree_page& page, const string& filename);
+void write_index_page(unsigned int page_id, B_tree_page& page, const string& filename);
 
-B_tree_page* init_B_tree_page(B_tree_page *page);
+void init_B_tree_page(B_tree_page *page);
 void free_index_page(unsigned int id);
 void remove_rec_from_data_dat(B_tree_record rec);
 void flush_all_buffers(const string& data_dat_filename, const string& index_dat_filename);
+
+
+//PAGE BUFFERS
+
+
+unordered_map<unsigned int, unique_ptr<B_tree_page>> index_buffer;
+unordered_map<unsigned int, Data_page> data_buffer;
 
 
 //STRUCTS
@@ -111,7 +114,6 @@ struct B_tree_page
     unsigned int children_id[MAX_KEYS + 2];    //id of pages - one more in case of overflow
     unsigned int parent_id;
     bool dirty;
-    bool is_free;
     unsigned int next_free;
     unsigned int pin_count;     //to mark currently used pages in the buffer
 
@@ -160,6 +162,7 @@ struct B_tree_page
             cout<<keys[i].key<<" ";
         }
         cout<<endl;
+
         if(!is_leaf())
         {
             for(int i = 0; i<keys_num+1;i++)
@@ -177,7 +180,6 @@ struct B_tree_page
         {
             return UINT_MAX;      //compensation impossible for the root
         }
-
         B_tree_page* parent = get_index_page(parent_id, INDEX_DAT_FILENAME);
         parent->pin_count--;
 
@@ -219,7 +221,6 @@ struct B_tree_page
         sibling->pin_count--;
         if ((is_overflown() && sibling->has_free_slots()) || (is_underflown() && sibling->keys_num > MIN_KEYS))
         {   
-            sibling->pin_count--;
             return i-1;     //return left sibling
         }
         else
@@ -350,7 +351,7 @@ struct B_tree_page
         }
         else
         {
-            //left
+            //left sibling
             int i = 0;
             for (i = 0; i<med; i++)
             {
@@ -362,7 +363,7 @@ struct B_tree_page
             }
             if(!is_leaf())
             {
-                children_id[med] = all_children[med];
+                sibling->children_id[med] = all_children[med];
             }
             sibling->keys_num = med;
             //parent
@@ -382,6 +383,25 @@ struct B_tree_page
             if(!is_leaf())
             {
                 children_id[sibling->keys_num] = all_children[all_keys_num];
+            }
+        }
+
+        //AND setting children's parent ids
+        if(!is_leaf())
+        {
+            for(int i = 0; i<keys_num+1; i++)
+            {
+                B_tree_page* current_child = get_index_page(children_id[i], INDEX_DAT_FILENAME);
+                current_child->dirty = true;
+                current_child->parent_id = id;
+                current_child->pin_count--;       
+            }
+            for(int i = 0; i<sibling->keys_num+1; i++)
+            {
+                B_tree_page* current_child = get_index_page(sibling->children_id[i], INDEX_DAT_FILENAME);
+                current_child->dirty = true;
+                current_child->parent_id = sibling->id;
+                current_child->pin_count--;
             }
         }
         /*write_index_page(id, *this, INDEX_DAT_FILENAME);
@@ -405,25 +425,44 @@ struct B_tree_page
 
         //filling new page
         B_tree_page new_page_s;
-        B_tree_page* new_page = init_B_tree_page(&new_page_s);        //it's going to be page on the right side
+        B_tree_page* new_page = &new_page_s;
+        init_B_tree_page(new_page);        //it's going to be page on the right side
         unsigned int med = keys_num / 2;
+        new_page->dirty = true;
+        new_page->pin_count++;
         for(int i = 0; i<keys_num-med-1;i++)
         {
             new_page->keys[i] = keys[med+1+i];        //moving keys to the new page
             new_page->children_id[i] = children_id[med+1+i];
-            keys[med+1+i] = {UINT_MAX, id, UINT_MAX};       //clearing spot
+            if(!is_leaf())
+            {
+                B_tree_page* current_child = get_index_page(new_page->children_id[i], INDEX_DAT_FILENAME);
+                current_child->parent_id = new_page->id;
+                current_child->dirty = true;
+                current_child->pin_count--;
+            }
+            keys[med+1+i] = {UINT_MAX, UINT_MAX, UINT_MAX};       //clearing spot
             children_id[med+1+i] = UINT_MAX;
         }
         new_page->keys_num = keys_num - med - 1;
         new_page->children_id[new_page->keys_num] =children_id[keys_num];       //last child covered 
+        new_page->pin_count--;
+
+        if(!is_leaf())
+        {
+            B_tree_page* last_child = get_index_page(new_page->children_id[new_page->keys_num], INDEX_DAT_FILENAME);
+            last_child->parent_id = new_page->id;
+            last_child->pin_count--;
+        }
         children_id[keys_num] = UINT_MAX;
+        keys_num = med;
 
         dirty = true;
         new_page->dirty = true;
 
         //moving key to the parent and connecting the parent with the new page
         B_tree_page parent_s;
-        B_tree_page* parent;
+        B_tree_page* parent = &parent_s;
         int i = 0;
         if(!is_root())
         {
@@ -444,7 +483,6 @@ struct B_tree_page
             parent->keys_num += 1;
             parent->dirty = true;
             keys[med] = {UINT_MAX, UINT_MAX, UINT_MAX};
-            keys_num = med;
 
             //overflow
             if(parent->keys_num > MAX_KEYS)
@@ -462,15 +500,15 @@ struct B_tree_page
         }
         else
         {
-            parent = init_B_tree_page(&parent_s);
+            init_B_tree_page(parent);
             parent->keys[0] = keys[med];
-            keys[med] = {UINT_MAX, id, UINT_MAX};
-            keys_num = med;
+            keys[med] = {UINT_MAX,  UINT_MAX, UINT_MAX};
             parent_id = parent->id;
             new_page->parent_id = parent->id;
             parent->children_id[0] = id;
             parent->children_id[1] = new_page->id;
             parent->keys_num = 1;
+            parent->dirty = true;
         }
         write_index_page(parent->id, *parent, INDEX_DAT_FILENAME);
         write_index_page(new_page->id, *new_page, INDEX_DAT_FILENAME);
@@ -509,7 +547,9 @@ struct B_tree_page
             }
             else
             {
+                pin_count++;
                 split();
+                pin_count--;
             }
         }
     }
@@ -528,7 +568,7 @@ struct B_tree_page
         }
 
         //deciding whether we're taking left or right sibling
-         B_tree_page* sibling;
+        B_tree_page* sibling;
         B_tree_page* left;
         B_tree_page* right;
         unsigned int left_child_id;     //IN PARENT->CHILDREN_ID, NOT PAGE ID
@@ -558,23 +598,31 @@ struct B_tree_page
             parent->keys[i] = parent->keys[i+1];
             parent->children_id[i+1] = parent->children_id[i+2];
         }
-        parent->keys[keys_num] = {UINT_MAX, parent->id, UINT_MAX};
+        parent->keys[keys_num] = {UINT_MAX, UINT_MAX, UINT_MAX};
         parent->children_id[keys_num+1] = UINT_MAX;
 
         for(int i = 0; i < right->keys_num; i++)
         {
             left->keys[left->keys_num] = right->keys[i];
             left->keys_num++;
-            right->keys[i] = {UINT_MAX, right->id, UINT_MAX};
+            right->keys[i] = {UINT_MAX, UINT_MAX, UINT_MAX};
         }
         right->keys_num = 0;
         free_index_page(right->id);
+        
+        sibling->pin_count--;
 
         if(parent->is_underflown())
         {
             if(parent->is_root())
             {
+                for(int i = 0; i<=MIN_KEYS; i++)
+                {
+                    //sign children from right to left sibling!
+                    left->children_id[MIN_KEYS+i] = right->children_id[i];      //it will always be MIN_KEYS + i, otherwise merge wouldn't be called 
+                }
                 free_index_page(parent->id);
+                parent->parent_id = 0;          //so that it won't be seen as a root anymore
                 left->parent_id = UINT_MAX;     //new root
             }
             else
@@ -592,7 +640,6 @@ struct B_tree_page
         }
 
         parent->pin_count--;
-        sibling->pin_count--;
     }
 };
 
@@ -617,8 +664,8 @@ struct B_tree
             B_tree_page* root_page = get_index_page(root, index_dat_filename);
             root_page->print(1, 1);
             root_page->pin_count--;
-            cout<<"Disk reads performed: "<<read_count_data + read_count_index - disk_reads_before<<endl;
-            cout<<"Disk writes performed: "<<write_count_data + write_count_index - disk_writes_before<<endl;
+            //cout<<"Disk reads performed: "<<read_count_data + read_count_index - disk_reads_before<<endl;
+            //cout<<"Disk writes performed: "<<write_count_data + write_count_index - disk_writes_before<<endl;
         }
         else
         {
@@ -643,7 +690,6 @@ struct B_tree
 
         while(true)
         {
-            cout<<current_page_id<<endl;
             current_page = get_index_page(current_page_id, index_dat_filename);
 
             int result = current_page->bisection_search(key);
@@ -687,32 +733,26 @@ struct B_tree
 
     void insert(B_tree_record new_B_rec)
     {
-        cout<<"Inserting record with key "<<new_B_rec.key<<endl;
+        cout<<"\n\nInserting record with key "<<new_B_rec.key<<endl;
         
         unsigned int disk_reads_before = read_count_data + read_count_index;
         unsigned int disk_writes_before = write_count_data + write_count_index;
 
-            pair<B_tree_page*, unsigned int> result = search_for(new_B_rec.key);
-            B_tree_page* current_page = result.first;
-            unsigned int pos = result.second;
+        pair<B_tree_page*, unsigned int> result = search_for(new_B_rec.key);
+        B_tree_page* current_page = result.first;
+        unsigned int pos = result.second;
 
-            if (pos != UINT_MAX)
-            {
-                cout<<"Error: Couldn't insert record. Record with key "<<new_B_rec.key<<" already exists in the B-tree."<<endl;
-                cout<<"Disk reads performed: "<<read_count_data + read_count_index - disk_reads_before<<endl;
-                cout<<"Disk writes performed: "<<write_count_data + write_count_index - disk_writes_before<<endl;
-                return;
-            }
+        if (pos != UINT_MAX)
+        {
+            cout<<"Error: Couldn't insert record. Record with key "<<new_B_rec.key<<" already exists in the B-tree."<<endl;
+            cout<<"Disk reads performed: "<<read_count_data + read_count_index - disk_reads_before<<endl;
+            cout<<"Disk writes performed: "<<write_count_data + write_count_index - disk_writes_before<<endl;
+            return;
+        }
 
-        //pair<unsigned int, unsigned int> data_location = insert_rec_in_data_dat(new_rec);
-        //unsigned int dpage_id = data_location.first;
-        //unsigned int offset = data_location.second;
-
-        //B_tree_record new_B_rec = {new_rec.key, dpage_id, offset};
-
-        unsigned int current_page_id = current_page->id;
-
+        current_page->pin_count++;
         current_page->insert(new_B_rec);
+        current_page->pin_count--;
 
         B_tree_page* root_p = get_index_page(root, index_dat_filename);
         if(!root_p->is_root())
@@ -735,7 +775,7 @@ struct B_tree
 
     Record read_record(unsigned int key)
     {
-        cout<<"Reading record with key "<<key<<endl;
+        cout<<"\n\nReading record with key "<<key<<endl;
         
         unsigned int disk_reads_before = read_count_data + read_count_index;
         unsigned int disk_writes_before = write_count_data + write_count_index;
@@ -788,7 +828,7 @@ struct B_tree
 
     void update_record(Record rec)
     {
-        cout<<"Updating record with key "<<rec.key<<" to ";
+        cout<<"\n\nUpdating record with key "<<rec.key<<" to ";
         for(int i = 0; i<5; i++)
         {
             cout<<rec.sides[i]<<" ";
@@ -828,7 +868,7 @@ struct B_tree
 
     void remove(unsigned int key)
     {
-        cout<<"Removing record with key "<<key<<endl;
+        cout<<"\n\nRemoving record with key "<<key<<endl;
         
         unsigned int disk_reads_before = read_count_data + read_count_index;
         unsigned int disk_writes_before = write_count_data + write_count_index;
@@ -924,6 +964,13 @@ struct B_tree
 
         page_to_check->pin_count--;
 
+        B_tree_page* root_p = get_index_page(root, index_dat_filename);
+
+        if(!root_p->is_root())
+        {
+            root = root_p->children_id[0];
+        }
+
         cout<<"Disk reads performed: "<<read_count_data + read_count_index - disk_reads_before<<endl;
         cout<<"Disk writes performed: "<<write_count_data + write_count_index - disk_writes_before<<endl;
         cout<<endl;
@@ -937,39 +984,31 @@ struct B_tree
 };
 
 
-//PAGE BUFFERS
-
-
-unordered_map<unsigned int, unique_ptr<B_tree_page>> index_buffer;
-unordered_map<unsigned int, Data_page> data_buffer;
-
-
 //FUNCTIONS
 
-Data_page* init_data_page(Data_page &dpage)
+
+void init_data_page(Data_page *dpage)
 {
-    dpage.rec_num = 0;
-    dpage.id = next_data_page_id;
-    dpage.dirty = false;
+    dpage->rec_num = 0;
+    dpage->id = next_data_page_id;
+    dpage->dirty = true;
     for(int i = 0; i<DATA_PAGE_SIZE; i++)
     {
-        dpage.slot_free[i] = true;
-        dpage.records[i] = {dpage.id, {-1, -1, -1, -1, -1}};
+        dpage->slot_free[i] = true;
+        dpage->records[i] = {dpage->id, {-1, -1, -1, -1, -1}};
     }
+    data_pages_with_free_slots.push_back(dpage->id);
     next_data_page_id++;
-    data_pages_with_free_slots.push_back(dpage.id);
-    Data_page* dpage_p = &dpage;
-    write_data_page(dpage.id, dpage, DATA_DAT_FILENAME);
-    return dpage_p;
+
+    write_data_page(dpage->id, *dpage, DATA_DAT_FILENAME);
 }
 
 //returns id of data page and offset
 pair <unsigned int, unsigned int> insert_rec_in_data_dat(Record rec)
 {
-    cout<<"wchodzi do insert in data"<<endl;
     unsigned int dpage_id;
     Data_page dpage;
-    Data_page* dpage_p;
+    Data_page* dpage_p = &dpage;
     int i = 0;
     if(!data_pages_with_free_slots.empty())
     { 
@@ -1001,45 +1040,13 @@ pair <unsigned int, unsigned int> insert_rec_in_data_dat(Record rec)
     else
     {
         dpage_id = next_data_page_id;
-        dpage_p = init_data_page(dpage);
+        init_data_page(dpage_p);
     }
     dpage_p->records[i] = rec;
     dpage_p->slot_free[i] = false;
     dpage_p->dirty = true;
     dpage_p->rec_num++;
     return {dpage_id, i};
-}
-
-void create_dat_files(const string &txt, const string &data_dat_filename, const string& index_dat_filename)
-{
-    ifstream in(txt);
-    ofstream data_out(data_dat_filename, ios::binary | ios::out | ios::trunc);  // trunc - file will be overwritten/created
-    ofstream index_out(index_dat_filename, ios::binary | ios::out | ios::trunc);
-
-    if (!in.is_open()) {
-        cerr << "Error: Couldn't open"<<txt<< "file"<< endl;
-        return;
-    }
-    if (!data_out.is_open()) {
-        cerr << "Error: Couldn't open"<<data_dat_filename <<"file" << endl;
-        return;
-    }
-    if (!index_out.is_open()) {
-        cerr << "Error: Couldn't open"<<index_dat_filename <<"file" << endl;
-        return;
-    }
-
-    B_tree tree;
-    tree.root = UINT_MAX;
-    tree.data_dat_filename = data_dat_filename;
-    tree.index_dat_filename = index_dat_filename;
-
-
-    while(true)
-    {
-        
-
-    }
 }
 
 void process_operations(const string& filename, B_tree* tree)
@@ -1050,7 +1057,6 @@ void process_operations(const string& filename, B_tree* tree)
         cerr << "Error: Couldn't open operations file " << filename << endl;
         return;
     }
-    cout<<"Czy sie przekazal index dat filename: "<<tree->index_dat_filename<<endl;
 
     string line;
     while (getline(in, line))
@@ -1060,7 +1066,6 @@ void process_operations(const string& filename, B_tree* tree)
         // INSERT
         if (line.rfind("insert(", 0) == 0)
         {
-            // usuń "insert(" i ")"
             line = line.substr(7, line.size() - 8);
 
             stringstream ss(line);
@@ -1098,6 +1103,14 @@ void process_operations(const string& filename, B_tree* tree)
                 ss >> r.sides[i];
 
             tree->update_record(r);
+        }
+
+        else if (line.rfind("read(", 0)==0)
+        {
+            line = line.substr(7, line.size() - 8);
+
+            unsigned int key = stoi(line);
+            tree->read_record(key);
         }
 
         else
@@ -1139,6 +1152,7 @@ void txt_to_dat(const string &txt, const string &dat) {
                 {
                     current_page.slot_free[k] = true;
                 }
+                data_pages_with_free_slots.push_back(current_page.id);
                 break;      //eof
             }
             for (int j = 0; j < 5; j++)
@@ -1160,21 +1174,26 @@ void txt_to_dat(const string &txt, const string &dat) {
     out.close();
 }
 
-B_tree_page* init_B_tree_page(B_tree_page* page)
+void init_B_tree_page(B_tree_page* page)
 {
-    cout<<"tu?"<<endl;
-    page->id = next_page_id;
-    cout<<"juz tu?"<<endl;
+    if(free_list_head != UINT_MAX)
+    {
+       page = get_index_page(free_list_head, INDEX_DAT_FILENAME);
+       free_list_head = page->next_free;
+    }
+    else 
+    {
+        page->id = next_page_id;
+    }
     page->keys_num = 0;
     page->parent_id = UINT_MAX;
     page->dirty = true;
-    page->is_free = false;
     page->next_free = UINT_MAX;
     page->pin_count = 0;
 
     for (unsigned int i = 0; i < MAX_KEYS + 1; i++)
     {
-        page->keys[i] = {UINT_MAX, page->id, UINT_MAX};
+        page->keys[i] = {UINT_MAX,  UINT_MAX, UINT_MAX};
     }
 
     for (unsigned int i = 0; i < MAX_KEYS + 2; i++)
@@ -1184,10 +1203,7 @@ B_tree_page* init_B_tree_page(B_tree_page* page)
 
     next_page_id++;
 
-    cout<<"przed write"<<endl;
     write_index_page(page->id, *page, INDEX_DAT_FILENAME);
-    cout<<"po write"<<endl;
-    return page;
 }
 
 void free_index_page(unsigned int id)
@@ -1198,7 +1214,7 @@ void free_index_page(unsigned int id)
         return;
     }
 
-    page->is_free = true;
+    page->pin_count--;
     page->next_free = free_list_head;
     free_list_head = id;
 
@@ -1210,7 +1226,7 @@ B_tree_page* get_index_page(unsigned int page_id, const string& filename)
 {
     if (page_id == UINT_MAX)
     {
-        cout<<"Error: Tried to get page number UINT_MAX"<<endl;
+        cerr<<"Error: Tried to get index page number UINT_MAX"<<endl;
         return nullptr;
     }
 
@@ -1277,7 +1293,7 @@ B_tree_page* get_index_page(unsigned int page_id, const string& filename)
 
 }
 
-void write_index_page(unsigned int page_id, const B_tree_page& page, const string& filename)
+void write_index_page(unsigned int page_id, B_tree_page& page, const string& filename)
 {
     fstream index(filename, ios::binary | ios::in | ios::out);
     if (!index.is_open())
@@ -1286,6 +1302,7 @@ void write_index_page(unsigned int page_id, const B_tree_page& page, const strin
         return;
     }
 
+    page.dirty = false;
     index.seekp(page_id * sizeof(B_tree_page), ios::beg);
     index.write(reinterpret_cast<const char*>(&page), sizeof(B_tree_page));
 
@@ -1330,24 +1347,19 @@ Data_page* get_data_page(unsigned int page_id, const string& filename)
     read_count_data++;
     if (data_buffer.size() >= INDEX_BUFFER_LIMIT)
     {
-        cout<<"pp"<<endl;
         auto victim = data_buffer.begin(); //removing first page from the buffer
-        //cout<<"do usuniecia id: "<<victim->second.id<<endl;
-        cout<<"pu"<<endl;
         if (victim->second.dirty)
         {
             victim->second.dirty = false;
             write_data_page(victim->first, victim->second, filename);
         }
-        cout<<"po"<<endl;
         data_buffer.erase(victim);
-        cout<<"pi"<<endl;
     }
     data_buffer[page_id] = page;
     return &data_buffer[page_id];
 }
 
-void write_data_page(unsigned int page_id, const Data_page& page, const string& filename)
+void write_data_page(unsigned int page_id, Data_page& page, const string& filename)
 {
     fstream data(filename, ios::binary | ios::in | ios::out);
     if (!data.is_open())
@@ -1356,6 +1368,7 @@ void write_data_page(unsigned int page_id, const Data_page& page, const string& 
         return;
     }
 
+    page.dirty = false;
     data.seekp(page_id * sizeof(Data_page), ios::beg);
     data.write(reinterpret_cast<const char*>(&page), sizeof(Data_page));
 
@@ -1501,7 +1514,10 @@ void create_b_tree(B_tree* tree_p, const string& data_filename)
         data.seekg(dpage_id * sizeof(Data_page), ios::beg);
         data.read((char*)&dpage, sizeof(Data_page));
 
-        if (!data) break; // koniec pliku
+        if (!data)
+        {
+            break;
+        }
 
         //filling index pages
         for (unsigned int i = 0; i < dpage.rec_num; i++)
@@ -1519,7 +1535,8 @@ void create_b_tree(B_tree* tree_p, const string& data_filename)
             {
 
                 B_tree_page root_page;
-                B_tree_page* root = init_B_tree_page(&root_page);
+                B_tree_page* root = &root_page;
+                init_B_tree_page(root);
 
                 write_index_page(0, *root, INDEX_DAT_FILENAME);
 
@@ -1539,51 +1556,51 @@ void create_b_tree(B_tree* tree_p, const string& data_filename)
     cout << "B-tree successfully created from " << data_filename << endl << endl;
 }
 
-
-void show_menu()
+void generate_random_records (const string& filename, unsigned int n,unsigned int start = 1)
 {
+    std::vector<unsigned int> keys;
+    keys.reserve(n);
 
-    bool program_on = true;
-    while(program_on)
+    for (unsigned int i = 0; i < n; i++)
     {
-        //opcje - generuj rekordy/wczytaj z pliku/zakoncz
-
-        //potem dodaj/usun rekord/zakoncz
+        keys.push_back(start + i);
     }
-}
+    random_device rd;
+    mt19937 gen(rd());
+    shuffle(keys.begin(), keys.end(), gen);
 
-void init_file(const string& filename)
-{
-    ofstream out(filename, std::ios::binary | std::ios::app);
+    ofstream out(filename);
+    if (!out.is_open())
+    {
+        cerr << "Error: couldn't open"<<filename<<"\n";
+        return;
+    }
+    for (auto k : keys)
+    {
+        out << k << " 1 1 1 1 1\n";
+    }
+
 }
 
 //MAIN
 
 int main()
 {
-    /*init_file(DATA_DAT_FILENAME);
-    init_file(INDEX_DAT_FILENAME);
-
-    B_tree tree;
-    tree.root = UINT_MAX;
-    tree.data_dat_filename = DATA_DAT_FILENAME;
-    tree.index_dat_filename = INDEX_DAT_FILENAME;*/
-
-    //process_operations(INSTRUCTIONS_TXT_FILENAME, tree);
-
-    //show_menu();
-    txt_to_dat(MANUAL_TXT_FILENAME, DATA_DAT_FILENAME);
+    if(RANDOM_RECORDS)
+    {
+        generate_random_records(RANDOM_TXT_FILENAME, NUMBER_OF_RECORDS);
+        txt_to_dat(RANDOM_TXT_FILENAME, DATA_DAT_FILENAME);
+    }
+    else
+    {
+        txt_to_dat(MANUAL_TXT_FILENAME, DATA_DAT_FILENAME);
+    }
     B_tree tree;
     B_tree* tree_p = &tree;
     create_b_tree(tree_p, DATA_DAT_FILENAME);
     process_operations(INSTRUCTIONS_TXT_FILENAME, tree_p);
-
-    //tree_p->remove(3);
-    //tree_p->remove(2);
-    //tree_p->remove(1);
-    //tree_p->read_record(7);
-    //tree_p->read_record(13);
-    //print_data_dat(DATA_DAT_FILENAME);
     flush_all_buffers(DATA_DAT_FILENAME, INDEX_DAT_FILENAME);
+    cout<<"All disk read operations: "<<read_count_data+read_count_index<<endl;
+    cout<<"All disk write operations: "<<write_count_data+write_count_index<<endl;
     return 0;
 }
